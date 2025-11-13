@@ -1,79 +1,75 @@
 // src/services/api.js
-import { auth } from "../firebase/initFirebase"; // path relative to src/services
-// If you prefer getAuth():
-// import { getAuth } from "firebase/auth";
+// API wrapper used by pages. Attaches Firebase ID token when available.
+// Exports listingsAPI and ordersAPI.
 
-const BASE = import.meta.env.VITE_API_BASE || "http://localhost:5000"; // change to your backend
+import { getAuth } from "firebase/auth";
 
-async function getIdToken() {
-  const user = auth.currentUser;
-  if (!user) return null;
-  try {
-    return await user.getIdToken(/* forceRefresh */ false);
-  } catch (err) {
-    console.warn("Failed to get ID token", err);
-    return null;
-  }
-}
+const BASE = import.meta.env.VITE_API_URL || "http://localhost:3000/api";
 
-async function request(path, options = {}) {
-  const headers = options.headers || {};
-  headers["Content-Type"] = headers["Content-Type"] || "application/json";
-
-  // attach token when available
-  const token = await getIdToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
+async function call(path, method = "GET", body) {
+  const auth = getAuth();
+  const token = auth.currentUser ? await auth.currentUser.getIdToken() : null;
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
 
   const res = await fetch(`${BASE}${path}`, {
-    ...options,
+    method,
     headers,
+    body: body ? JSON.stringify(body) : undefined,
   });
 
-  if (!res.ok) {
-    // try to parse error body
-    let body;
-    try { body = await res.json(); } catch (e) { body = await res.text(); }
-    const err = new Error(body?.message || res.statusText || "Request failed");
-    err.status = res.status;
-    err.body = body;
-    throw err;
+  // try parse JSON safely
+  const text = await res.text().catch(() => "");
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
   }
 
-  // return json if possible, else text
-  const ct = res.headers.get("content-type") || "";
-  if (ct.includes("application/json")) return res.json();
-  return res.text();
+  if (!res.ok) {
+    const msg = (data && (data.message || data.error)) || res.statusText || "API error";
+    throw new Error(msg);
+  }
+  return data;
 }
 
 export const listingsAPI = {
-  // create a new listing (POST /listings)
-  async create(payload) {
-    return request("/listings", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+  // getAll({ category, limit, page })
+  getAll: (opts = {}) => {
+    const q = new URLSearchParams();
+    if (opts.category) q.set("category", opts.category);
+    if (opts.limit) q.set("limit", opts.limit);
+    if (opts.page) q.set("page", opts.page);
+    const qp = q.toString() ? `?${q.toString()}` : "";
+    return call(`/listings${qp}`, "GET");
   },
 
-  // get recent listings (GET /listings?limit=6)
-  async list({ limit = 6, page = 1 } = {}) {
-    const q = new URLSearchParams({ limit: String(limit), page: String(page) }).toString();
-    return request(`/listings?${q}`, { method: "GET" });
-  },
+  // get single listing
+  getOne: (id) => call(`/listings/${id}`, "GET"),
 
-  // get a single listing by id (GET /listings/:id)
-  async get(id) {
-    return request(`/listings/${encodeURIComponent(id)}`, { method: "GET" });
-  },
+  // create new listing (protected)
+  create: (payload) => call(`/listings`, "POST", payload),
 
-  // optionally add update/delete methods if your backend supports them
-  async update(id, payload) {
-    return request(`/listings/${encodeURIComponent(id)}`, {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    });
-  },
+  // update listing (protected)
+  update: (id, payload) => call(`/listings/${id}`, "PUT", payload),
 
-  async remove(id) {
-    return request(`/listings/${encodeURIComponent(id)}`, { method: "DELETE" });
-  },
+  // delete listing (protected)
+  remove: (id) => call(`/listings/${id}`, "DELETE"),
+
+  // convenience wrapper
+  fetchByCategory: (category, limit = 12, page = 1) =>
+    listingsAPI.getAll({ category, limit, page }),
+};
+
+export const ordersAPI = {
+  // create an order (protected)
+  create: (payload) => call(`/orders`, "POST", payload),
+
+  // get current user's orders (protected)
+  getMine: () => call(`/orders`, "GET"),
+
+  // admin / other endpoints (if your server exposes them)
+  getAll: () => call(`/orders/all`, "GET"),
+  // you can add more helpers as needed
 };
